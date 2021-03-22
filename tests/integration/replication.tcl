@@ -5,7 +5,7 @@ proc log_file_matches {log pattern} {
     string match $pattern $content
 }
 
-start_server {tags {"repl"}} {
+start_server {tags {"repl network"}} {
     set slave [srv 0 client]
     set slave_host [srv 0 host]
     set slave_port [srv 0 port]
@@ -75,6 +75,27 @@ start_server {tags {"repl"}} {
             r incrbyfloat test 0.1
             after 1000
             assert_equal [$A debug digest] [$B debug digest]
+        }
+
+        test {GETSET replication} {
+            $A config resetstat
+            $A config set loglevel debug
+            $B config set loglevel debug
+            r set test foo
+            assert_equal [r getset test bar] foo
+            wait_for_condition 500 10 {
+                [$A get test] eq "bar"
+            } else {
+                fail "getset wasn't propagated"
+            }
+            assert_equal [r set test vaz get] bar
+            wait_for_condition 500 10 {
+                [$A get test] eq "vaz"
+            } else {
+                fail "set get wasn't propagated"
+            }
+            assert_match {*calls=3,*} [cmdrstat set $A]
+            assert_match {} [cmdrstat getset $A]
         }
 
         test {BRPOPLPUSH replication, when blocking against empty list} {
@@ -175,9 +196,11 @@ start_server {tags {"repl"}} {
         } {master}
 
         test {SLAVEOF should start with link status "down"} {
+            r multi
             r slaveof [srv -1 host] [srv -1 port]
-            s master_link_status
-        } {down}
+            r info replication
+            r exec
+        } {*master_link_status:down*}
 
         test {The role should immediately be changed to "replica"} {
             s role

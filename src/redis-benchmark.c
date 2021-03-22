@@ -59,6 +59,7 @@
 #include "crc16_slottable.h"
 #include "hdr_histogram.h"
 #include "cli_common.h"
+#include "mt19937-64.h"
 
 #define UNUSED(V) ((void) V)
 #define RANDPTR_INITIAL_SIZE 8
@@ -101,7 +102,6 @@ static struct config {
     int showerrors;
     long long start;
     long long totlatency;
-    long long *latency;
     const char *title;
     list *clients;
     int quiet;
@@ -566,6 +566,9 @@ static void readHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
                         * we need to randomize. */
                         for (j = 0; j < c->randlen; j++)
                             c->randptr[j] -= c->prefixlen;
+                        /* Fix the pointers to the slot hash tags */
+                        for (j = 0; j < c->staglen; j++)
+                            c->stagptr[j] -= c->prefixlen;
                         c->prefixlen = 0;
                     }
                     continue;
@@ -1182,8 +1185,8 @@ static int fetchClusterConfiguration() {
         }
         if (myself) {
             node = firstNode;
-            if (node->ip == NULL && ip != NULL) {
-                node->ip = ip;
+            if (ip != NULL && strcmp(node->ip, ip) != 0) {
+                node->ip = sdsnew(ip);
                 node->port = port;
             }
         } else {
@@ -1299,7 +1302,8 @@ static int fetchClusterSlotsConfiguration(client c) {
         NULL,                      /* val dup */
         dictSdsKeyCompare,         /* key compare */
         NULL,                      /* key destructor */
-        NULL                       /* val destructor */
+        NULL,                      /* val destructor */
+        NULL                       /* allow to expand */
     };
     /* printf("[%d] fetchClusterSlotsConfiguration\n", c->thread_id); */
     dict *masters = dictCreate(&dtype, NULL);
@@ -1514,12 +1518,22 @@ int parseOptions(int argc, const char **argv) {
         } else if (!strcmp(argv[i],"--cacert")) {
             if (lastarg) goto invalid;
             config.sslconfig.cacert = strdup(argv[++i]);
+        } else if (!strcmp(argv[i],"--insecure")) {
+            config.sslconfig.skip_cert_verify = 1;
         } else if (!strcmp(argv[i],"--cert")) {
             if (lastarg) goto invalid;
             config.sslconfig.cert = strdup(argv[++i]);
         } else if (!strcmp(argv[i],"--key")) {
             if (lastarg) goto invalid;
             config.sslconfig.key = strdup(argv[++i]);
+        } else if (!strcmp(argv[i],"--tls-ciphers")) {
+            if (lastarg) goto invalid;
+            config.sslconfig.ciphers = strdup(argv[++i]);
+        #ifdef TLS1_3_VERSION
+        } else if (!strcmp(argv[i],"--tls-ciphersuites")) {
+            if (lastarg) goto invalid;
+            config.sslconfig.ciphersuites = strdup(argv[++i]);
+        #endif
         #endif
         } else {
             /* Assume the user meant to provide an option when the arg starts
@@ -1575,8 +1589,18 @@ usage:
 " --cacertdir <dir>  Directory where trusted CA certificates are stored.\n"
 "                    If neither cacert nor cacertdir are specified, the default\n"
 "                    system-wide trusted root certs configuration will apply.\n"
+" --insecure         Allow insecure TLS connection by skipping cert validation.\n"
 " --cert <file>      Client certificate to authenticate with.\n"
 " --key <file>       Private key file to authenticate with.\n"
+" --tls-ciphers <list> Sets the list of prefered ciphers (TLSv1.2 and below)\n"
+"                    in order of preference from highest to lowest separated by colon (\":\").\n"
+"                    See the ciphers(1ssl) manpage for more information about the syntax of this string.\n"
+#ifdef TLS1_3_VERSION
+" --tls-ciphersuites <list> Sets the list of prefered ciphersuites (TLSv1.3)\n"
+"                    in order of preference from highest to lowest separated by colon (\":\").\n"
+"                    See the ciphers(1ssl) manpage for more information about the syntax of this string,\n"
+"                    and specifically for TLSv1.3 ciphersuites.\n"
+#endif
 #endif
 " --help             Output this help and exit.\n"
 " --version          Output version and exit.\n\n"
@@ -1631,7 +1655,10 @@ int showThroughput(struct aeEventLoop *eventLoop, long long id, void *clientData
     const float instantaneous_rps = (float)(requests_finished-previous_requests_finished)/instantaneous_dt;
     config.previous_tick = current_tick;
     atomicSet(config.previous_requests_finished,requests_finished);
-    config.last_printed_bytes = printf("%s: rps=%.1f (overall: %.1f) avg_msec=%.3f (overall: %.3f)\r", config.title, instantaneous_rps, rps, hdr_mean(config.current_sec_latency_histogram)/1000.0f, hdr_mean(config.latency_histogram)/1000.0f);
+    int printed_bytes = printf("%s: rps=%.1f (overall: %.1f) avg_msec=%.3f (overall: %.3f)\r", config.title, instantaneous_rps, rps, hdr_mean(config.current_sec_latency_histogram)/1000.0f, hdr_mean(config.latency_histogram)/1000.0f);
+    if (printed_bytes > config.last_printed_bytes){
+       config.last_printed_bytes = printed_bytes;
+    }
     hdr_reset(config.current_sec_latency_histogram);
     fflush(stdout);
     return 250; /* every 250ms */
@@ -1658,10 +1685,12 @@ int main(int argc, const char **argv) {
 
     client c;
 
-    srandom(time(NULL));
+    srandom(time(NULL) ^ getpid());
+    init_genrand64(ustime() ^ getpid());
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
 
+    memset(&config.sslconfig, 0, sizeof(config.sslconfig));
     config.numclients = 50;
     config.requests = 100000;
     config.liveclients = 0;
@@ -1812,7 +1841,7 @@ int main(int argc, const char **argv) {
 
         if (test_is_selected("ping_mbulk") || test_is_selected("ping")) {
             len = redisFormatCommand(&cmd,"PING");
-            benchmark("PING_BULK",cmd,len);
+            benchmark("PING_MBULK",cmd,len);
             free(cmd);
         }
 

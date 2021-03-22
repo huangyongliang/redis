@@ -147,8 +147,7 @@ void *connGetPrivateData(connection *conn) {
 /* Close the connection and free resources. */
 static void connSocketClose(connection *conn) {
     if (conn->fd != -1) {
-        aeDeleteFileEvent(server.el,conn->fd,AE_READABLE);
-        aeDeleteFileEvent(server.el,conn->fd,AE_WRITABLE);
+        aeDeleteFileEvent(server.el,conn->fd, AE_READABLE | AE_WRITABLE);
         close(conn->fd);
         conn->fd = -1;
     }
@@ -428,7 +427,7 @@ int connGetState(connection *conn) {
  * For sockets, we always return "fd=<fdnum>" to maintain compatibility.
  */
 const char *connGetInfo(connection *conn, char *buf, size_t buf_len) {
-    snprintf(buf, buf_len-1, "fd=%i", conn->fd);
+    snprintf(buf, buf_len-1, "fd=%i", conn == NULL ? -1 : conn->fd);
     return buf;
 }
 

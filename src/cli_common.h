@@ -10,10 +10,16 @@ typedef struct cliSSLconfig {
     char *cacert;
     /* Directory where trusted CA certificates are stored, or NULL */
     char *cacertdir;
+    /* Skip server certificate verification. */
+    int skip_cert_verify;
     /* Client certificate to authenticate with, or NULL */
     char *cert;
     /* Private key file to authenticate with, or NULL */
     char *key;
+    /* Prefered cipher list, or NULL (applies only to <= TLSv1.2) */
+    char* ciphers;
+    /* Prefered ciphersuites list, or NULL (applies only to TLSv1.3) */
+    char* ciphersuites;
 } cliSSLconfig;
 
 /* Wrapper around redisSecureConnection to avoid hiredis_ssl dependencies if
